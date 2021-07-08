@@ -62,7 +62,7 @@ struct BuilderInner<B, E> {
     err_handler: Option<ErrHandler<B>>,
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static>
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static>
     RouterBuilder<B, E>
 {
     /// Creates a new `RouterBuilder` instance with default options.
@@ -105,7 +105,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     }
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static>
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static>
     RouterBuilder<B, E>
 {
     /// Adds a new route with `GET` method and the handler at the specified path.
@@ -132,7 +132,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn get<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::GET], handler)
@@ -162,7 +162,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn get_or_head<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::GET, Method::HEAD], handler)
@@ -192,7 +192,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn post<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::POST], handler)
@@ -222,7 +222,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn put<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::PUT], handler)
@@ -252,7 +252,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn delete<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::DELETE], handler)
@@ -282,7 +282,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn head<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::HEAD], handler)
@@ -312,7 +312,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn trace<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::TRACE], handler)
@@ -342,7 +342,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn connect<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::CONNECT], handler)
@@ -372,7 +372,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn patch<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::PATCH], handler)
@@ -402,7 +402,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn options<P, H, R>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, vec![Method::OPTIONS], handler)
@@ -442,7 +442,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     /// ```
     pub fn any<H, R>(self, handler: H) -> Self
     where
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add("/*", constants::ALL_POSSIBLE_HTTP_METHODS.to_vec(), handler)
@@ -473,7 +473,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn any_method<H, R, P>(self, path: P, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.add(path, constants::ALL_POSSIBLE_HTTP_METHODS.to_vec(), handler)
@@ -503,14 +503,14 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     pub fn add<P, H, R>(self, path: P, methods: Vec<Method>, handler: H) -> Self
     where
         P: Into<String>,
-        H: FnMut(Request<hyper::Body>) -> R + Send + Sync + 'static,
+        H: Fn(Request<hyper::Body>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<Response<B>, E>> + Send + 'static,
     {
         self.and_then(move |mut inner| {
             let mut path = path.into();
 
-            if !path.ends_with("/") && !path.ends_with("*") {
-                path.push_str("/");
+            if !path.ends_with('/') && !path.ends_with('*') {
+                path.push('/');
             }
 
             let route = Route::new(path, methods, handler)?;
@@ -559,7 +559,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     {
         let mut path = path.into();
 
-        if path.ends_with("/") {
+        if path.ends_with('/') {
             path = (&path[..path.len() - 1]).to_string();
         }
 
@@ -633,7 +633,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     }
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static>
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static>
     RouterBuilder<B, E>
 {
     /// Adds a single middleware. A pre middleware can be created by [`Middleware::pre`](./enum.Middleware.html#method.pre) method and a post
@@ -695,9 +695,9 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
 
     /// Adds a handler to handle any error raised by the routes or any middlewares. Please refer to [Error Handling](./index.html#error-handling) section
     /// for more info.
-    pub fn err_handler<H, R>(self, mut handler: H) -> Self
+    pub fn err_handler<H, R>(self, handler: H) -> Self
     where
-        H: FnMut(crate::Error) -> R + Send + Sync + 'static,
+        H: Fn(crate::Error) -> R + Send + Sync + 'static,
         R: Future<Output = Response<B>> + Send + 'static,
     {
         let handler: ErrHandlerWithoutInfo<B> = Box::new(move |err: crate::Error| Box::new(handler(err)));
@@ -714,9 +714,9 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     ///
     /// Please refer to [Error Handling](./index.html#error-handling) section
     /// for more info.
-    pub fn err_handler_with_info<H, R>(self, mut handler: H) -> Self
+    pub fn err_handler_with_info<H, R>(self, handler: H) -> Self
     where
-        H: FnMut(crate::Error, RequestInfo) -> R + Send + Sync + 'static,
+        H: Fn(crate::Error, RequestInfo) -> R + Send + Sync + 'static,
         R: Future<Output = Response<B>> + Send + 'static,
     {
         let handler: ErrHandlerWithInfo<B> =
@@ -729,7 +729,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     }
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static> Default
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static> Default
     for RouterBuilder<B, E>
 {
     fn default() -> RouterBuilder<B, E> {

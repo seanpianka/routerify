@@ -1,10 +1,16 @@
+use crate::constants;
 use crate::data_map::ScopedDataMap;
 use crate::middleware::{PostMiddleware, PreMiddleware};
 use crate::route::Route;
 use crate::types::RequestInfo;
 use crate::Error;
-use hyper::{body::HttpBody, Request, Response};
+use hyper::{
+    body::HttpBody,
+    header::{self, HeaderValue},
+    Method, Request, Response, StatusCode,
+};
 use regex::RegexSet;
+use std::any::Any;
 use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::pin::Pin;
@@ -14,11 +20,11 @@ pub use self::builder::RouterBuilder;
 mod builder;
 
 pub(crate) type ErrHandlerWithoutInfo<B> =
-    Box<dyn FnMut(crate::Error) -> ErrHandlerWithoutInfoReturn<B> + Send + Sync + 'static>;
+    Box<dyn Fn(crate::Error) -> ErrHandlerWithoutInfoReturn<B> + Send + Sync + 'static>;
 pub(crate) type ErrHandlerWithoutInfoReturn<B> = Box<dyn Future<Output = Response<B>> + Send + 'static>;
 
 pub(crate) type ErrHandlerWithInfo<B> =
-    Box<dyn FnMut(crate::Error, RequestInfo) -> ErrHandlerWithInfoReturn<B> + Send + Sync + 'static>;
+    Box<dyn Fn(crate::Error, RequestInfo) -> ErrHandlerWithInfoReturn<B> + Send + Sync + 'static>;
 pub(crate) type ErrHandlerWithInfoReturn<B> = Box<dyn Future<Output = Response<B>> + Send + 'static>;
 
 /// Represents a modular, lightweight and mountable router type.
@@ -78,18 +84,18 @@ pub(crate) enum ErrHandler<B> {
     WithInfo(ErrHandlerWithInfo<B>),
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static> ErrHandler<B> {
-    pub(crate) async fn execute(&mut self, err: crate::Error, req_info: Option<RequestInfo>) -> Response<B> {
+impl<B: HttpBody + Send + Sync + 'static> ErrHandler<B> {
+    pub(crate) async fn execute(&self, err: crate::Error, req_info: Option<RequestInfo>) -> Response<B> {
         match self {
-            ErrHandler::WithoutInfo(ref mut err_handler) => Pin::from(err_handler(err)).await,
-            ErrHandler::WithInfo(ref mut err_handler) => {
+            ErrHandler::WithoutInfo(ref err_handler) => Pin::from(err_handler(err)).await,
+            ErrHandler::WithInfo(ref err_handler) => {
                 Pin::from(err_handler(err, req_info.expect("No RequestInfo is provided"))).await
             }
         }
     }
 }
 
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static> Router<B, E> {
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static> Router<B, E> {
     pub(crate) fn new(
         pre_middlewares: Vec<PreMiddleware<E>>,
         routes: Vec<Route<B, E>>,
@@ -122,24 +128,137 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
         Ok(())
     }
 
-    pub(crate) fn init_req_info_gen(&mut self) -> crate::Result<()> {
-        if let Some(ref err_handler) = self.err_handler {
-            if let ErrHandler::WithInfo(_) = err_handler {
-                self.should_gen_req_info = Some(true);
-                return Ok(());
-            }
+    pub(crate) fn init_req_info_gen(&mut self) {
+        if let Some(ErrHandler::WithInfo(_)) = self.err_handler {
+            self.should_gen_req_info = Some(true);
+            return;
         }
 
         for post_middleware in self.post_middlewares.iter() {
             if post_middleware.should_require_req_meta() {
                 self.should_gen_req_info = Some(true);
-                return Ok(());
+                return;
             }
         }
 
         self.should_gen_req_info = Some(false);
+    }
 
-        Ok(())
+    pub(crate) fn init_x_powered_by_middleware(&mut self) {
+        let x_powered_by_post_middleware = PostMiddleware::new("/*", |mut res| async move {
+            res.headers_mut().insert(
+                constants::HEADER_NAME_X_POWERED_BY,
+                HeaderValue::from_static(constants::HEADER_VALUE_X_POWERED_BY),
+            );
+            Ok(res)
+        })
+        .unwrap();
+
+        self.post_middlewares.insert(0, x_powered_by_post_middleware);
+    }
+
+    // pub(crate) fn init_keep_alive_middleware(&mut self) {
+    //     let keep_alive_post_middleware = PostMiddleware::new("/*", |mut res| async move {
+    //         res.headers_mut()
+    //             .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+    //         Ok(res)
+    //     })
+    //     .unwrap();
+
+    //     self.post_middlewares.push(keep_alive_post_middleware);
+    // }
+
+    pub(crate) fn init_global_options_route(&mut self) {
+        let options_method = vec![Method::OPTIONS];
+        let found = self
+            .routes
+            .iter()
+            .any(|route| route.path == "/*" && route.methods.as_slice() == options_method.as_slice());
+
+        if found {
+            return;
+        }
+
+        if let Some(router) = self.downcast_to_hyper_body_type() {
+            let options_route: Route<hyper::Body, E> = Route::new("/*", options_method, |_req| async move {
+                Ok(Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(hyper::Body::empty())
+                    .expect("Couldn't create the default OPTIONS response"))
+            })
+            .unwrap();
+
+            router.routes.push(options_route);
+        } else {
+            eprintln!(
+                "Warning: No global `options method` route added. It is recommended to send response to any `options` request.\n\
+                Please add one by calling `.options(\"/*\", handler)` method of the root router builder.\n"
+            );
+        }
+    }
+
+    pub(crate) fn init_default_404_route(&mut self) {
+        let found = self
+            .routes
+            .iter()
+            .any(|route| route.path == "/*" && route.methods.as_slice() == &constants::ALL_POSSIBLE_HTTP_METHODS[..]);
+
+        if found {
+            return;
+        }
+
+        if let Some(router) = self.downcast_to_hyper_body_type() {
+            let default_404_route: Route<hyper::Body, E> =
+                Route::new("/*", constants::ALL_POSSIBLE_HTTP_METHODS.to_vec(), |_req| async move {
+                    Ok(Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(hyper::Body::from(StatusCode::NOT_FOUND.canonical_reason().unwrap()))
+                        .expect("Couldn't create the default 404 response"))
+                })
+                .unwrap();
+            router.routes.push(default_404_route);
+        } else {
+            eprintln!(
+                "Warning: No default 404 route added. It is recommended to send 404 response to any non-existent route.\n\
+                Please add one by calling `.any(handler)` method of the root router builder.\n"
+            );
+        }
+    }
+
+    pub(crate) fn init_err_handler(&mut self) {
+        let found = self.err_handler.is_some();
+
+        if found {
+            return;
+        }
+
+        if let Some(router) = self.downcast_to_hyper_body_type() {
+            let handler: ErrHandler<hyper::Body> = ErrHandler::WithoutInfo(Box::new(move |err: crate::Error| {
+                Box::new(async move {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(hyper::Body::from(format!(
+                            "{}: {}",
+                            StatusCode::INTERNAL_SERVER_ERROR.canonical_reason().unwrap(),
+                            err
+                        )))
+                        .expect("Couldn't create a response while handling the server error")
+                })
+            }));
+            router.err_handler = Some(handler);
+        } else {
+            eprintln!(
+                "Warning: No error handler added. It is recommended to add one to see what went wrong if any route or middleware fails.\n\
+                Please add one by calling `.err_handler(handler)` method of the root router builder.\n"
+            );
+        }
+    }
+
+    fn downcast_to_hyper_body_type(&mut self) -> Option<&mut Router<hyper::Body, E>> {
+        let any_obj: &mut dyn Any = self;
+        any_obj.downcast_mut::<Router<hyper::Body, E>>()
     }
 
     /// Return a [RouterBuilder](./struct.RouterBuilder.html) instance to build a `Router`.
@@ -148,7 +267,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     }
 
     pub(crate) async fn process(
-        &mut self,
+        &self,
         target_path: &str,
         mut req: Request<hyper::Body>,
         mut req_info: Option<RequestInfo>,
@@ -167,7 +286,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
 
         if let Some(ref mut req_info) = req_info {
             if !shared_data_maps.is_empty() {
-                req_info.shared_data_maps.replace(Box::new(shared_data_maps.clone()));
+                req_info.shared_data_maps.replace(shared_data_maps.clone());
             }
         }
 
@@ -176,14 +295,14 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
 
         let mut transformed_req = req;
         for idx in matched_pre_middleware_idxs {
-            let pre_middleware = &mut self.pre_middlewares[idx];
+            let pre_middleware = &self.pre_middlewares[idx];
 
             transformed_req = pre_middleware.process(transformed_req).await?;
         }
 
         let mut resp = None;
         for idx in matched_route_idxs {
-            let route = &mut self.routes[idx];
+            let route = &self.routes[idx];
 
             if route.is_match_method(transformed_req.method()) {
                 let route_resp_res = route.process(target_path, transformed_req).await;
@@ -191,7 +310,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
                 let route_resp = match route_resp_res {
                     Ok(route_resp) => route_resp,
                     Err(err) => {
-                        if let Some(ref mut err_handler) = self.err_handler {
+                        if let Some(ref err_handler) = self.err_handler {
                             err_handler.execute(err, req_info.clone()).await
                         } else {
                             return Err(err);
@@ -210,7 +329,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
 
         let mut transformed_res = resp.unwrap();
         for idx in matched_post_middleware_idxs {
-            let post_middleware = &mut self.post_middlewares[idx];
+            let post_middleware = &self.post_middlewares[idx];
             transformed_res = post_middleware.process(transformed_res, req_info.clone()).await?;
         }
 

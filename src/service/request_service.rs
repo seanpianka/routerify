@@ -1,27 +1,19 @@
 use crate::helpers;
 use crate::router::Router;
-use crate::types::{RequestInfo, RequestMeta};
+use crate::types::{RequestContext, RequestInfo, RequestMeta};
 use hyper::{body::HttpBody, service::Service, Request, Response};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 pub struct RequestService<B, E> {
-    pub(crate) router: *mut Router<B, E>,
+    pub(crate) router: Arc<Router<B, E>>,
     pub(crate) remote_addr: SocketAddr,
 }
 
-unsafe impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static> Send
-    for RequestService<B, E>
-{
-}
-unsafe impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static> Sync
-    for RequestService<B, E>
-{
-}
-
-impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + Sync + Unpin + 'static>
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static>
     Service<Request<hyper::Body>> for RequestService<B, E>
 {
     type Response = Response<B>;
@@ -33,7 +25,7 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
     }
 
     fn call(&mut self, mut req: Request<hyper::Body>) -> Self::Future {
-        let router = unsafe { &mut *self.router };
+        let router = self.router.clone();
         let remote_addr = self.remote_addr;
 
         let fut = async move {
@@ -41,8 +33,8 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
 
             let mut target_path = helpers::percent_decode_request_path(req.uri().path())?;
 
-            if target_path.as_bytes()[target_path.len() - 1] != b'/' {
-                target_path.push_str("/");
+            if target_path.is_empty() || target_path.as_bytes()[target_path.len() - 1] != b'/' {
+                target_path.push('/');
             }
 
             let mut req_info = None;
@@ -50,14 +42,18 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
                 .should_gen_req_info
                 .expect("The `should_gen_req_info` flag in Router is not initialized");
 
+            let context = RequestContext::new();
+
             if should_gen_req_info {
-                req_info = Some(RequestInfo::new_from_req(&req));
+                req_info = Some(RequestInfo::new_from_req(&req, context.clone()));
             }
+
+            req.extensions_mut().insert(context);
 
             match router.process(target_path.as_str(), req, req_info.clone()).await {
                 Ok(resp) => crate::Result::Ok(resp),
                 Err(err) => {
-                    if let Some(ref mut err_handler) = router.err_handler {
+                    if let Some(ref err_handler) = router.err_handler {
                         crate::Result::Ok(err_handler.execute(err, req_info.clone()).await)
                     } else {
                         crate::Result::Err(err)
@@ -67,5 +63,73 @@ impl<B: HttpBody + Send + Sync + Unpin + 'static, E: std::error::Error + Send + 
         };
 
         Box::pin(fut)
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestServiceBuilder<B, E> {
+    router: Arc<Router<B, E>>,
+}
+
+impl<B: HttpBody + Send + Sync + 'static, E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static>
+    RequestServiceBuilder<B, E>
+{
+    pub fn new(mut router: Router<B, E>) -> crate::Result<Self> {
+        router.init_x_powered_by_middleware();
+        // router.init_keep_alive_middleware();
+
+        router.init_global_options_route();
+        router.init_default_404_route();
+
+        router.init_err_handler();
+
+        router.init_regex_set()?;
+        router.init_req_info_gen();
+        Ok(Self {
+            router: Arc::from(router),
+        })
+    }
+
+    pub fn build(&mut self, remote_addr: SocketAddr) -> RequestService<B, E> {
+        RequestService {
+            router: self.router.clone(),
+            remote_addr,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Error, RequestServiceBuilder, Router};
+    use futures::future::poll_fn;
+    use http::Method;
+    use hyper::service::Service;
+    use hyper::{Body, Request, Response};
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use std::task::Poll;
+
+    #[tokio::test]
+    async fn should_route_request() {
+        const RESPONSE_TEXT: &str = "Hello world!";
+        let remote_addr = SocketAddr::from_str("0.0.0.0:8080").unwrap();
+        let router: Router<hyper::body::Body, Error> = Router::builder()
+            .get("/", |_| async move { Ok(Response::new(Body::from(RESPONSE_TEXT))) })
+            .build()
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(hyper::Body::empty())
+            .unwrap();
+        let mut builder = RequestServiceBuilder::new(router).unwrap();
+        let mut service = builder.build(remote_addr);
+        poll_fn(|ctx| -> Poll<Result<(), Error>> { service.poll_ready(ctx) })
+            .await
+            .expect("request service is not ready");
+        let resp: Response<hyper::body::Body> = service.call(req).await.unwrap();
+        let body = resp.into_body();
+        let body = String::from_utf8(hyper::body::to_bytes(body).await.unwrap().to_vec()).unwrap();
+        assert_eq!(RESPONSE_TEXT, body)
     }
 }
